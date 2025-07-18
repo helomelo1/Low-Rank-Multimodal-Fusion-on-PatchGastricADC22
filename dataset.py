@@ -11,9 +11,8 @@ class PatchGastricMILDataset(Dataset):
         self.image_dir = image_dir
         self.labels_df = pd.read_csv(label_csv)
 
-        # Column names in your CSV
-        scan_col = "id"      # <<< CHANGE THIS if needed
-        label_col = "subtype"       # <<< CHANGE THIS if needed
+        scan_col = "id"
+        label_col = "subtype"
 
         self.transform = transform if transform else transforms.Compose([
             transforms.Resize((224, 224)),
