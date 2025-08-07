@@ -8,7 +8,7 @@ from correlation_module import CorrelationModule
 model = models.resnet50(pretrained=True)
 model = nn.Sequential(*list(model.children)[:-1])
 
-def extract_and_save_features(dataloader, device, feature):
+def extract_and_save_features(dataloader, device, feature_dir):
     patch_batch_size = 64
     for bag_tensor, label, scan_id in tqdm(dataloader):
         scan_id = scan_id[0]
