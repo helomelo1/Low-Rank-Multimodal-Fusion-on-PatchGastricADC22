@@ -43,3 +43,38 @@ class TransformerLayer(nn.Module):
         query = query + self.dropout3(ffn_output)
 
         return query
+    
+
+class QueryTransformer(nn.Module):
+    def __init__(self, num_queries, num_layers, d_model, nhead, vocab_size=None, max_seq_line=128):
+        super().__init__()
+        self.learnable_queries = nn.Embedding(num_queries, d_model)
+        self.txt = vocab_size is not None
+        if self.txt:
+            self.token_embedding = nn.Embedding(vocab_size, d_model)
+            self.positional_embedding = nn.Embedding(max_seq_line, d_model)
+
+        self.layers = nn.ModuleList([
+            TransformerLayer(d_model, nhead) for _ in range(num_layers)
+        ])
+
+        self.norm = nn.LayerNorm(d_model)
+
+    
+    def forward(self, image_features, caption_features=None):
+        batch_size = image_features.shape[0]
+        device = image_features.device
+
+        query = self.learnable_queries.weight.unsqueeze(0).repeat(batch_size, 1, 1)
+        
+        text_embeds = None
+        if self.txt and caption_features is not None:
+            token_embeds = self.token_embedding(caption_features)
+            positions = torch.arange(0, caption_features.shape[0], device=device).unsqueeze(0)
+            pos_embeds = self.positional_embedding(positions)
+            text_embeds = token_embeds + pos_embeds
+
+        for layer in self.layers:
+            query = layer(query, text_embeds, image_features)
+
+        return self.norm(query)
