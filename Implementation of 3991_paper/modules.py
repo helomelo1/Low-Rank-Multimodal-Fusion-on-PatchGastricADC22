@@ -15,3 +15,16 @@ class CorrelationModule(nn.Module):
         x = self.norm(x)
 
         return x
+    
+
+class ClassificationModule(nn.Module):
+    def __init__(self, d_model: int, num_classes: int):
+        super().__init__()
+        self.classifier = nn.Linear(d_model, num_classes)
+
+
+    def forward(self, query_outputs: torch.Tensor) ->  torch.Tensor:
+        k_logits = self.classifier(query_outputs)
+        final_logits = k_logits.mean(dim=1)
+        
+        return final_logits
