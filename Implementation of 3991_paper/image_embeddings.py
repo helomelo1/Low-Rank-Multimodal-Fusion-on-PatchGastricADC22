@@ -3,7 +3,6 @@ import torch
 import torch.nn as nn
 from torchvision import models
 from tqdm import tqdm
-from correlation_module import CorrelationModule
 
 model = models.resnet50(pretrained=True)
 model = nn.Sequential(*list(model.children)[:-1])
