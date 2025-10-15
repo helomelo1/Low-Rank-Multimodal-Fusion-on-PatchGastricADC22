@@ -1,0 +1,10 @@
+numpy
+pandas
+polars
+torch
+torchvision
+tqdm
+PIL
+sklearn
+sentence_transformers
+matplotlib
