@@ -13,7 +13,6 @@ label_csv = ""
 histo_feature_dir = ""
 caption_feature_dir = ""
 
-
 dataset = PatchGastricMILDataset(image_dir, label_csv)
 dataloader = DataLoader(dataset, batch_size=1, shuffle=False)
 

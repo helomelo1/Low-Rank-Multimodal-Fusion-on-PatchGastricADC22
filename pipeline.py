@@ -1,6 +1,18 @@
+import os
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
+import torch.optim as optim
+
+from tqdm import tqdm
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+
+image_dir = ""
+label_csv = ""
+histo_feature_dir = ""
+caption_feature_dir = ""
 
 class LMF(nn.Module):
     def __init__(self, rank=4, hidden_dims=[2048, 384], output_dim=128):
@@ -102,9 +114,9 @@ for epoch in range(10):
         label = row["subtype"]
 
         try:
-            img_patches = torch.load(f"features_of_scans/{scan_id}.pt")["features"]
+            img_patches = torch.load(f"{histo_feature_dir}/{scan_id}.pt")["features"]
             img_feat = attention_pool(img_patches.unsqueeze(0).squeeze(0))
-            cap_feat = torch.load(f"features_per_caption/{scan_id}.pt")["embedding"]
+            cap_feat = torch.load(f"{caption_feature_dir}/{scan_id}.pt")["embedding"]
         except Exception as e:
             print(f"Skipping {scan_id}: {e}")
             continue
@@ -138,8 +150,8 @@ with torch.no_grad():
         label = row["subtype"]
 
         try:
-            img_feat = torch.load(f"features_of_scans/{scan_id}.pt")["features"].mean(dim=0)
-            cap_feat = torch.load(f"features_per_caption/{scan_id}.pt")["embedding"]
+            img_feat = torch.load(f"{histo_feature_dir}/{scan_id}.pt")["features"].mean(dim=0)
+            cap_feat = torch.load(f"{caption_feature_dir}/{scan_id}.pt")["embedding"]
         except:
             continue
 
