@@ -68,7 +68,7 @@ class AttentionPooling(nn.Module):
 
         return x.mean(dim=1)
 
-
+# Training Pipeline
 model = MultimodalClassifier(rank=64, fusion_dim=128, num_classes=3)
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 criterion = nn.CrossEntropyLoss()
@@ -86,3 +86,71 @@ train_df, test_df = train_test_split(
 train_df.to_csv("train.csv", index=False)
 test_df.to_csv("test.csv", index=False)
 
+train_df = pd.read_csv("train.csv")
+test_df = pd.read_csv("test.csv")
+
+label_to_idx = {label: idx for idx, label in enumerate(sorted(train_df["subtype"].unique()))}
+num_classes = len(label_to_idx)
+
+for epoch in range(10):
+    model.train()
+    total_loss = 0
+    all_preds, all_labels = [], []
+
+    for _, row in tqdm(train_df.iterrows(), total=len(train_df), desc=f"Epoch {epoch + 1}"):
+        scan_id = row["id"]
+        label = row["subtype"]
+
+        try:
+            img_patches = torch.load(f"features_of_scans/{scan_id}.pt")["features"]
+            img_feat = attention_pool(img_patches.unsqueeze(0).squeeze(0))
+            cap_feat = torch.load(f"features_per_caption/{scan_id}.pt")["embedding"]
+        except Exception as e:
+            print(f"Skipping {scan_id}: {e}")
+            continue
+
+        img_feat = img_feat.unsqueeze(0).to(device)
+        cap_feat = cap_feat.unsqueeze(0).to(device)
+        label = torch.tensor([label_to_idx[label]]).to(device)
+
+        logits = model(img_feat, cap_feat)
+        loss = criterion(logits, label)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+        pred = torch.argmax(logits, dim=1).item()
+        all_preds.append(pred)
+        all_labels.append(label.item())
+
+    acc = accuracy_score(all_labels, all_preds)
+    print(f"Epoch {epoch + 1} | Train Loss: {total_loss:.4f} | Train Accuracy: {acc:.2%}")
+
+# Testing Pipeline
+model.eval()
+all_preds, all_labels = [], []
+
+with torch.no_grad():
+    for _, row in test_df.iterrows():
+        scan_id = row["id"]
+        label = row["subtype"]
+
+        try:
+            img_feat = torch.load(f"features_of_scans/{scan_id}.pt")["features"].mean(dim=0)
+            cap_feat = torch.load(f"features_per_caption/{scan_id}.pt")["embedding"]
+        except:
+            continue
+
+        img_feat = img_feat.unsqueeze(0).to(device)
+        cap_feat = cap_feat.unsqueeze(0).to(device)
+
+        logits = model(img_feat, cap_feat)
+        pred = torch.argmax(logits, dim=1).item()
+
+        all_preds.append(pred)
+        all_labels.append(label_to_idx[label])
+
+test_acc = accuracy_score(all_labels, all_preds)
+print(f"Final Test Accuracy: {test_acc:.2%}")
