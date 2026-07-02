@@ -1,10 +1,9 @@
 numpy
 pandas
-polars
 torch
 torchvision
 tqdm
-PIL
-sklearn
-sentence_transformers
+Pillow
+scikit-learn
+sentence-transformers
 matplotlib

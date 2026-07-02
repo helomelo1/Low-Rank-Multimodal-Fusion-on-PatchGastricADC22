@@ -11,8 +11,9 @@ from sklearn.metrics import accuracy_score
 
 image_dir = ""
 label_csv = ""
-histo_feature_dir = ""
-caption_feature_dir = ""
+histo_feature_dir = "features_per_scan"
+caption_feature_dir = "features_per_caption"
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
 class LMF(nn.Module):
     def __init__(self, rank=4, hidden_dims=[2048, 384], output_dim=128):
@@ -64,7 +65,7 @@ class PositionalEncoding(nn.Module):
         self.pe = nn.Parameter(torch.randn(max_l, dim))
 
     def forward(self, x):
-        return x + self.pe[:x.size(1)]
+        return x + self.pe[:x.size(1)].unsqueeze(0)
 
 
 class AttentionPooling(nn.Module):

@@ -1,0 +1,10 @@
+venv
+dataset
+__pycache__
+features_per_caption
+features_per_scan
+features_phikon
+features_mpnet
+logs*
+results*
+*.csv
