@@ -59,12 +59,6 @@ def seed_everything(seed: int = 42):
 # ──────────────────────────────────────────────────────────────
 
 class LowRankFusion(nn.Module):
-    """
-    Low-Rank Multimodal Fusion (LMF).
-    Reference: Liu et al., "Efficient Low-Rank Multimodal Fusion
-    with Modality-Specific Factors", ACL 2018.
-    """
-
     def __init__(self, dims, output_dim, rank):
         super().__init__()
         self.rank = rank
@@ -94,8 +88,6 @@ class PositionalEncoding(nn.Module):
 
 
 class AttentionPooling(nn.Module):
-    """Transformer encoder + mean aggregation over patch tokens."""
-
     def __init__(self, dim=768, nhead=4):
         super().__init__()
         self.pos_enc = PositionalEncoding(dim)
@@ -597,7 +589,7 @@ def _ensure_checkpoint(tag, args):
 
 def generate_tsne(args):
     """t-SNE: image-only vs text-only vs full method (3-panel)."""
-    print("\n▶ Generating t-SNE …")
+    print("\nGenerating t-SNE…")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     _, test_df, label_to_idx = load_split(args.csv, seed=args.seed)
     idx_to_label = {v: k for k, v in label_to_idx.items()}
@@ -704,7 +696,7 @@ def generate_confusion_matrix(args):
 
 
 def generate_attention_map(args):
-    print("\n▶ Generating attention heatmap …")
+    print("\nGenerating attention heatmap…")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     _, test_df, label_to_idx = load_split(args.csv, seed=args.seed)
     nc = len(label_to_idx)
@@ -850,7 +842,7 @@ def main():
         for vis_name in args.visualize:
             VISUALIZATIONS[vis_name](args)
 
-    print("\n✅ Done.")
+    print("\nDone.")
 
 
 if __name__ == "__main__":
