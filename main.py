@@ -1,17 +1,3 @@
-"""
-run_experiments.py
-
-Experiment runner for:
-    "Low-Rank Multimodal Fusion for Gastric Adenocarcinoma Subtype Classification"
-
-Usage:
-    python main.py --model full_method --epochs 10
-    python main.py --model full_method --rank 4 --epochs 10
-    python main.py --model late_fusion --epochs 10
-    python main.py --model full_method --evaluate --checkpoint results/full_method_r64/checkpoint.pt
-    python main.py --visualize tsne confusion_matrix attention
-"""
-
 import os
 import json
 import random
@@ -34,16 +20,18 @@ from sklearn.metrics import (
     confusion_matrix,
     classification_report,
 )
+from sklearn.preprocessing import normalize
+from sklearn.metrics import (
+    silhouette_score,
+    davies_bouldin_score,
+    calinski_harabasz_score,
+)
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from sklearn.manifold import TSNE
 
-
-# ──────────────────────────────────────────────────────────────
-# Reproducibility
-# ──────────────────────────────────────────────────────────────
 
 def seed_everything(seed: int = 42):
     random.seed(seed)
@@ -53,10 +41,6 @@ def seed_everything(seed: int = 42):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-
-# ──────────────────────────────────────────────────────────────
-# Model Components
-# ──────────────────────────────────────────────────────────────
 
 class LowRankFusion(nn.Module):
     def __init__(self, dims, output_dim, rank):
@@ -108,10 +92,6 @@ class AttentionPooling(nn.Module):
         return x.mean(dim=1)
 
 
-# ──────────────────────────────────────────────────────────────
-# Model Variants
-# ──────────────────────────────────────────────────────────────
-
 class ImageOnlyClassifier(nn.Module):
     def __init__(self, img_dim=768, num_classes=3):
         super().__init__()
@@ -156,13 +136,24 @@ class ConcatFusionClassifier(nn.Module):
         return self.dropout(self.relu(fused))
 
 
-class MultimodalLMFClassifier(nn.Module):
-    def __init__(self, img_dim=768, cap_dim=384, fusion_dim=128,
-                 rank=64, num_classes=3):
+class DistillationNetwork(nn.Module):
+    def __init__(self, img_dim=768, fusion_dim=128):
         super().__init__()
-        self.lmf = LowRankFusion(
-            dims=[img_dim, cap_dim], output_dim=fusion_dim, rank=rank,
+        self.net = nn.Sequential(
+            nn.Linear(img_dim, 512),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(512, fusion_dim)
         )
+
+    def forward(self, img_feat):
+        return self.net(img_feat)
+
+
+class MultimodalLMFClassifier(nn.Module):
+    def __init__(self, img_dim=768, cap_dim=384, fusion_dim=128, rank=64, num_classes=3):
+        super().__init__()
+        self.lmf = LowRankFusion(dims=[img_dim, cap_dim], output_dim=fusion_dim, rank=rank)
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout(0.3)
         self.fc = nn.Linear(fusion_dim, num_classes)
@@ -175,10 +166,92 @@ class MultimodalLMFClassifier(nn.Module):
         fused = self.lmf(img_feat, cap_feat)
         return self.dropout(self.relu(fused))
 
+    
+class ResidualBlock(nn.Module):
+    def __init__(self, dim, dropout=0.4):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.LayerNorm(dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(dim, dim),
+            nn.LayerNorm(dim)
+        )
+        
+    def forward(self, x):
+        return x + self.net(x)
 
-# ──────────────────────────────────────────────────────────────
-# Data Utilities
-# ──────────────────────────────────────────────────────────────
+
+class DistillationNetwork(nn.Module):
+    def __init__(self, img_dim=768, fusion_dim=128, hidden_dim=512, num_blocks=2):
+        super().__init__()
+        
+        self.proj_in = nn.Sequential(
+            nn.Linear(img_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Dropout(0.3)
+        )
+        
+        self.blocks = nn.ModuleList([
+            ResidualBlock(hidden_dim, dropout=0.4) for _ in range(num_blocks)
+        ])
+        
+        self.proj_out = nn.Sequential(
+            nn.Linear(hidden_dim, fusion_dim),
+            nn.LayerNorm(fusion_dim)
+        )
+        
+    def forward(self, img_feat):
+        x = self.proj_in(img_feat)
+        for block in self.blocks:
+            x = block(x)
+        return self.proj_out(x)
+
+
+class DistilledClassifier(nn.Module):
+    def __init__(self, teacher_model, img_dim=768, fusion_dim=128, num_classes=3):
+        super().__init__()
+        
+        self.teacher = teacher_model
+        for param in self.teacher.parameters():
+            param.requires_grad = False
+        self.teacher.eval() 
+            
+        self.hallucinator = nn.Sequential(
+            nn.Linear(img_dim, 512),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(512, fusion_dim)
+        )
+        
+    def forward(self, img_feat, cap_feat=None):
+        fused = self.hallucinator(img_feat)
+        return self.teacher.fc(self.teacher.dropout(self.teacher.relu(fused)))
+        
+    def forward_train(self, img_feat, cap_feat):
+        with torch.no_grad():
+            true_fused = self.teacher.lmf(img_feat, cap_feat)
+            teacher_logits = self.teacher.fc(self.teacher.dropout(self.teacher.relu(true_fused)))
+            
+        hallucinated_fused = self.hallucinator(img_feat)
+        student_logits = self.teacher.fc(self.teacher.dropout(self.teacher.relu(hallucinated_fused)))
+        feature_loss = F.smooth_l1_loss(hallucinated_fused, true_fused)
+        
+        T = 2.0 
+        kd_loss = nn.KLDivLoss(reduction='batchmean')(
+            F.log_softmax(student_logits / T, dim=1),
+            F.softmax(teacher_logits / T, dim=1)
+        ) * (T * T)
+        
+        distill_loss = feature_loss + (0.5 * kd_loss)
+        
+        return student_logits, distill_loss
+        
+    def get_features(self, img_feat, cap_feat=None):
+        fused = self.hallucinator(img_feat)
+        return self.teacher.dropout(self.teacher.relu(fused))
 
 def load_split(csv_path, train_size=0.2, seed=42):
     df = pd.read_csv(csv_path)
@@ -211,19 +284,10 @@ def load_features(scan_id, histo_dir, caption_dir):
     return img_data["features"], cap_data["embedding"]
 
 
-# ──────────────────────────────────────────────────────────────
-# Image Feature Aggregation
-# ──────────────────────────────────────────────────────────────
-
 def aggregate_patches(patches, device, mode="mean", attention_pool=None,
                       return_weights=False):
-    """
-    Aggregate patch features into a single image-level vector.
-    mode: "mean" | "attention" | "single"
-    """
     if mode == "single":
         return patches[0].unsqueeze(0).to(device), None
-
     if mode == "attention":
         inp = patches.unsqueeze(0).to(device)
         if return_weights:
@@ -246,6 +310,7 @@ def train_one_epoch(model, attention_pool, df, label_to_idx, histo_dir,
         attention_pool.train()
 
     total_loss = 0.0
+    total_ae_loss = 0.0
     all_preds, all_labels = [], []
 
     for _, row in tqdm(df.iterrows(), total=len(df), leave=False):
@@ -262,19 +327,31 @@ def train_one_epoch(model, attention_pool, df, label_to_idx, histo_dir,
         cap_feat = cap_feat.unsqueeze(0).to(device)
         label = torch.tensor([label_to_idx[label_str]], device=device)
 
-        logits = model(img_feat, cap_feat)
-        loss = criterion(logits, label)
+        if hasattr(model, 'forward_train'):
+            logits, ae_loss = model.forward_train(img_feat, cap_feat)
+            
+            cls_loss = criterion(logits, label)
+            loss = cls_loss + ae_loss 
+            
+            total_ae_loss += ae_loss.item()
+            total_loss += cls_loss.item()
+        else:
+            logits = model(img_feat, cap_feat)
+            loss = criterion(logits, label)
+            total_loss += loss.item()
 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-        total_loss += loss.item()
         all_preds.append(logits.argmax(1).item())
         all_labels.append(label.item())
 
     acc = accuracy_score(all_labels, all_preds) if all_labels else 0.0
-    return total_loss, acc
+    avg_loss = total_loss / len(df) if len(df) > 0 else 0.0
+    avg_ae_loss = total_ae_loss / len(df) if len(df) > 0 else 0.0
+    
+    return avg_loss, avg_ae_loss, acc
 
 
 @torch.no_grad()
@@ -287,6 +364,7 @@ def evaluate(model, attention_pool, df, label_to_idx, histo_dir,
 
     all_preds, all_labels = [], []
     embeddings, attention_records = [], []
+    val_ae_loss = 0.0
 
     for _, row in df.iterrows():
         scan_id, label_str = row["id"], row["subtype"]
@@ -302,7 +380,15 @@ def evaluate(model, attention_pool, df, label_to_idx, histo_dir,
         )
         cap_feat = cap_feat.unsqueeze(0).to(device)
 
-        logits = model(img_feat, cap_feat)
+        if hasattr(model, 'forward_train'):
+            # 1. Track Val AE Loss using the Teacher
+            _, ae_loss = model.forward_train(img_feat, cap_feat)
+            val_ae_loss += ae_loss.item()
+            
+            logits = model(img_feat) 
+        else:
+            logits = model(img_feat, cap_feat)
+            
         all_preds.append(logits.argmax(1).item())
         all_labels.append(label_to_idx[label_str])
 
@@ -313,11 +399,13 @@ def evaluate(model, attention_pool, df, label_to_idx, histo_dir,
             attention_records.append((scan_id, attn_w.cpu().squeeze(0)))
 
     metrics = {
-        "accuracy":  accuracy_score(all_labels, all_preds),
-        "precision": precision_score(all_labels, all_preds, average="macro", zero_division=0),
-        "recall":    recall_score(all_labels, all_preds, average="macro", zero_division=0),
-        "f1":        f1_score(all_labels, all_preds, average="macro", zero_division=0),
+        "accuracy":  accuracy_score(all_labels, all_preds) if all_labels else 0.0,
+        "precision": precision_score(all_labels, all_preds, average="macro", zero_division=0) if all_labels else 0.0,
+        "recall":    recall_score(all_labels, all_preds, average="macro", zero_division=0) if all_labels else 0.0,
+        "f1":        f1_score(all_labels, all_preds, average="macro", zero_division=0) if all_labels else 0.0,
+        "val_ae_loss": val_ae_loss / len(df) if len(df) > 0 else 0.0
     }
+    
     out = {"metrics": metrics, "preds": all_preds, "labels": all_labels}
 
     if collect_embeddings:
@@ -325,6 +413,86 @@ def evaluate(model, attention_pool, df, label_to_idx, histo_dir,
     if collect_attention:
         out["attention"] = attention_records
     return out
+
+
+def train_and_evaluate(model, attention_pool, train_df, val_df, test_df,
+                       label_to_idx, args, pool_mode="mean", tag=""):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    if attention_pool is not None:
+        attention_pool.to(device)
+
+    params = [p for p in model.parameters() if p.requires_grad]
+    if attention_pool is not None:
+        params += [p for p in attention_pool.parameters() if p.requires_grad]
+
+    optimizer = optim.Adam(params, lr=args.lr, weight_decay=1e-4)
+    criterion = nn.CrossEntropyLoss()
+
+    print(f"\n{'─'*60}")
+    print(f"  Training: {tag}")
+    print(f"{'─'*60}")
+
+    run_dir = os.path.join(args.output_dir, tag.replace(" ", "_"))
+    os.makedirs(run_dir, exist_ok=True)
+    ckpt_path = os.path.join(run_dir, "checkpoint.pt")
+    
+    best_val_f1 = -1.0
+
+    for epoch in range(1, args.epochs + 1):
+        train_loss, train_ae_loss, acc = train_one_epoch(
+            model, attention_pool, train_df, label_to_idx,
+            args.histo_feature_dir, args.caption_feature_dir,
+            optimizer, criterion, device, pool_mode=pool_mode,
+        )
+        
+        val_res = evaluate(
+            model, attention_pool, val_df, label_to_idx,
+            args.histo_feature_dir, args.caption_feature_dir,
+            device, pool_mode=pool_mode,
+        )
+        
+        val_f1 = val_res["metrics"]["f1"]
+        val_acc = val_res["metrics"]["accuracy"]
+        val_ae_loss = val_res["metrics"]["val_ae_loss"]
+        
+        if hasattr(model, 'forward_train'):
+            print(f"  Epoch {epoch:>3d}/{args.epochs} | Train AE Loss: {train_ae_loss:.4f} | Val AE Loss: {val_ae_loss:.4f} | Train Acc: {acc:.4f} | Val Acc: {val_acc:.4f} | Val F1: {val_f1:.4f}")
+        else:
+            print(f"  Epoch {epoch:>3d}/{args.epochs} | Train Loss: {train_loss:.4f} | Train Acc: {acc:.4f} | Val F1: {val_f1:.4f}")
+        
+        if val_f1 > best_val_f1:
+            best_val_f1 = val_f1
+            ckpt = {"model": model.state_dict()}
+            if attention_pool is not None:
+                ckpt["attention_pool"] = attention_pool.state_dict()
+            torch.save(ckpt, ckpt_path)
+
+    print(f"  Loading best checkpoint (val_f1={best_val_f1:.4f}) for final Test set evaluation...")
+    model, attention_pool = _load_checkpoint(model, attention_pool, ckpt_path, device)
+
+    result = evaluate(
+        model, attention_pool, test_df, label_to_idx,
+        args.histo_feature_dir, args.caption_feature_dir,
+        device, pool_mode=pool_mode,
+    )
+
+    m = result["metrics"]
+    print(f"  ── Test  acc={m['accuracy']:.4f}  prec={m['precision']:.4f}  "
+          f"rec={m['recall']:.4f}  f1={m['f1']:.4f}")
+
+    with open(os.path.join(run_dir, "metrics.json"), "w") as f:
+        json.dump(m, f, indent=2)
+
+    report = classification_report(
+        result["labels"], result["preds"],
+        target_names=sorted(label_to_idx, key=label_to_idx.get),
+    )
+    with open(os.path.join(run_dir, "classification_report.txt"), "w") as f:
+        f.write(report)
+
+    print(f"  Saved → {run_dir}/")
+    return result["metrics"], model, attention_pool
 
 
 @torch.no_grad()
@@ -365,90 +533,9 @@ def evaluate_late_fusion(img_model, txt_model, df, label_to_idx,
     }
 
 
-# ──────────────────────────────────────────────────────────────
-# Training Harness
-# ──────────────────────────────────────────────────────────────
-
-def train_and_evaluate(model, attention_pool, train_df, val_df, test_df,
-                       label_to_idx, args, pool_mode="mean", tag=""):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-    if attention_pool is not None:
-        attention_pool.to(device)
-
-    params = list(model.parameters())
-    if attention_pool is not None:
-        params += list(attention_pool.parameters())
-
-    optimizer = optim.Adam(params, lr=args.lr)
-    criterion = nn.CrossEntropyLoss()
-
-    print(f"\n{'─'*60}")
-    print(f"  Training: {tag}")
-    print(f"{'─'*60}")
-
-    run_dir = os.path.join(args.output_dir, tag.replace(" ", "_"))
-    os.makedirs(run_dir, exist_ok=True)
-    ckpt_path = os.path.join(run_dir, "checkpoint.pt")
-    
-    best_val_f1 = -1.0
-
-    for epoch in range(1, args.epochs + 1):
-        loss, acc = train_one_epoch(
-            model, attention_pool, train_df, label_to_idx,
-            args.histo_feature_dir, args.caption_feature_dir,
-            optimizer, criterion, device, pool_mode=pool_mode,
-        )
-        
-        val_res = evaluate(
-            model, attention_pool, val_df, label_to_idx,
-            args.histo_feature_dir, args.caption_feature_dir,
-            device, pool_mode=pool_mode,
-        )
-        val_f1 = val_res["metrics"]["f1"]
-        print(f"  Epoch {epoch:>3d}/{args.epochs}  loss={loss:.4f}  train_acc={acc:.4f}  val_f1={val_f1:.4f}")
-        
-        if val_f1 > best_val_f1:
-            best_val_f1 = val_f1
-            ckpt = {"model": model.state_dict()}
-            if attention_pool is not None:
-                ckpt["attention_pool"] = attention_pool.state_dict()
-            torch.save(ckpt, ckpt_path)
-
-    print(f"  Loading best checkpoint (val_f1={best_val_f1:.4f}) for final Test set evaluation...")
-    model, attention_pool = _load_checkpoint(model, attention_pool, ckpt_path, device)
-
-    result = evaluate(
-        model, attention_pool, test_df, label_to_idx,
-        args.histo_feature_dir, args.caption_feature_dir,
-        device, pool_mode=pool_mode,
-    )
-
-    m = result["metrics"]
-    print(f"  ── Test  acc={m['accuracy']:.4f}  prec={m['precision']:.4f}  "
-          f"rec={m['recall']:.4f}  f1={m['f1']:.4f}")
-
-    with open(os.path.join(run_dir, "metrics.json"), "w") as f:
-        json.dump(m, f, indent=2)
-
-    report = classification_report(
-        result["labels"], result["preds"],
-        target_names=sorted(label_to_idx, key=label_to_idx.get),
-    )
-    with open(os.path.join(run_dir, "classification_report.txt"), "w") as f:
-        f.write(report)
-
-    print(f"  Saved → {run_dir}/")
-    return result["metrics"], model, attention_pool
-
-
-# ──────────────────────────────────────────────────────────────
-# Experiment Dispatch
-# ──────────────────────────────────────────────────────────────
-
 MODEL_REGISTRY = {
     "image_only", "text_only", "concat_fusion", "late_fusion", "full_method",
-    "no_attn_pool", "no_lmf", "no_mil",
+    "no_attn_pool", "no_lmf", "no_mil", "distilled_method" # ADDED HERE
 }
 
 TAG_MAP = {
@@ -465,6 +552,8 @@ TAG_MAP = {
 def get_tag(model_name, rank=64):
     if model_name == "full_method":
         return f"full_method_r{rank}"
+    if model_name == "distilled_method":
+        return f"distilled_method_r{rank}"
     return TAG_MAP[model_name]
 
 
@@ -474,6 +563,20 @@ def run_model(args):
     train_df, val_df, test_df, label_to_idx = load_split(args.csv, seed=args.seed)
     nc = len(label_to_idx)
     name = args.model
+
+    if name == "distilled_method":
+        if not args.checkpoint:
+            raise ValueError("You must provide --checkpoint to the pre-trained full_method model for distillation.")
+            
+        teacher = MultimodalLMFClassifier(rank=args.rank, num_classes=nc)
+        teacher, _ = _load_checkpoint(teacher, None, args.checkpoint, device)
+        
+        model = DistilledClassifier(teacher_model=teacher)
+        
+        return train_and_evaluate(
+            model, None, train_df, val_df, test_df, label_to_idx, args,
+            pool_mode="mean", tag=get_tag(name, args.rank),
+        )
 
     if name == "image_only":
         model = ImageOnlyClassifier(num_classes=nc)
@@ -559,10 +662,6 @@ def run_model(args):
     raise ValueError(f"Unknown model: {name}")
 
 
-# ──────────────────────────────────────────────────────────────
-# Checkpoint Utilities
-# ──────────────────────────────────────────────────────────────
-
 def _load_checkpoint(model, attention_pool, ckpt_path, device):
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model"])
@@ -587,163 +686,264 @@ def _ensure_checkpoint(tag, args):
 # Visualisation
 # ──────────────────────────────────────────────────────────────
 
+
 def generate_tsne(args):
-    """t-SNE: image-only vs text-only vs full method (3-panel)."""
     print("\nGenerating t-SNE…")
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    _, test_df, label_to_idx = load_split(args.csv, seed=args.seed)
+
+    _, _, test_df, label_to_idx = load_split(args.csv, seed=args.seed)
+
     idx_to_label = {v: k for k, v in label_to_idx.items()}
     nc = len(label_to_idx)
     class_names = [idx_to_label[i] for i in range(nc)]
 
-    # image-only embeddings
     ckpt = _ensure_checkpoint("image_only", args)
+
     img_model = ImageOnlyClassifier(num_classes=nc)
     img_model, _ = _load_checkpoint(img_model, None, ckpt, device)
+
     res_img = evaluate(
-        img_model, None, test_df, label_to_idx,
-        args.histo_feature_dir, args.caption_feature_dir, device,
-        pool_mode="mean", collect_embeddings=True,
+        img_model,
+        None,
+        test_df,
+        label_to_idx,
+        args.histo_feature_dir,
+        args.caption_feature_dir,
+        device,
+        pool_mode="mean",
+        collect_embeddings=True,
     )
 
-    # text embeddings (raw sentence-transformer)
-    txt_embeds, txt_labels = [], []
+    txt_embeds = []
+    txt_labels = []
+
     for _, row in test_df.iterrows():
         try:
-            _, cap = load_features(row["id"], args.histo_feature_dir, args.caption_feature_dir)
-        except Exception:   
+            _, cap = load_features(
+                row["id"],
+                args.histo_feature_dir,
+                args.caption_feature_dir,
+            )
+        except Exception:
             continue
+
         txt_embeds.append(cap.numpy())
         txt_labels.append(label_to_idx[row["subtype"]])
+
     emb_txt = np.stack(txt_embeds)
     lbl_txt = np.array(txt_labels)
 
-    # full method embeddings
-    tag = f"full_method_r{args.rank}"
-    ckpt = _ensure_checkpoint(tag, args)
-    full_model = MultimodalLMFClassifier(rank=args.rank, num_classes=nc)
-    full_model, _ = _load_checkpoint(full_model, None, ckpt, device)
-    res_full = evaluate(
-        full_model, None, test_df, label_to_idx,
-        args.histo_feature_dir, args.caption_feature_dir, device,
-        pool_mode="mean", collect_embeddings=True,
+    teacher_ckpt = _ensure_checkpoint(
+        f"full_method_r{args.rank}", args
+    )
+
+    teacher = MultimodalLMFClassifier(
+        rank=args.rank,
+        num_classes=nc,
+    )
+
+    teacher, _ = _load_checkpoint(
+        teacher,
+        None,
+        teacher_ckpt,
+        device,
+    )
+
+    res_teacher = evaluate(
+        teacher,
+        None,
+        test_df,
+        label_to_idx,
+        args.histo_feature_dir,
+        args.caption_feature_dir,
+        device,
+        pool_mode="mean",
+        collect_embeddings=True,
+    )
+
+    distilled_ckpt = _ensure_checkpoint(
+        f"distilled_method_r{args.rank}", args
+    )
+
+    ckpt = torch.load(distilled_ckpt, map_location="cpu", weights_only=False)
+
+    print("Checkpoint keys:")
+    for k in ckpt["model"].keys():
+        print(k)
+
+    distilled = DistilledClassifier(teacher_model=teacher)
+
+    distilled, _ = _load_checkpoint(
+        distilled,
+        None,
+        distilled_ckpt,
+        device,
+    )
+
+    res_distilled = evaluate(
+        distilled,
+        None,
+        test_df,
+        label_to_idx,
+        args.histo_feature_dir,
+        args.caption_feature_dir,
+        device,
+        pool_mode="mean",
+        collect_embeddings=True,
     )
 
     panels = [
-        ("Image Only",  res_img["embeddings"],  np.array(res_img["labels"])),
-        ("Text Only",   emb_txt,                lbl_txt),
-        ("Full Method", res_full["embeddings"], np.array(res_full["labels"])),
-    ]
+    (
+        "Image Only",
+        res_img["embeddings"],
+        np.array(res_img["labels"]),
+        "image_only_tsne.png",
+    ),
+    (
+        "Text Only",
+        emb_txt,
+        lbl_txt,
+        "text_only_tsne.png",
+    ),
+    (
+        "LMF Teacher",
+        res_teacher["embeddings"],
+        np.array(res_teacher["labels"]),
+        "teacher_tsne.png",
+    ),
+    (
+        "Distilled Student",
+        res_distilled["embeddings"],
+        np.array(res_distilled["labels"]),
+        "student_tsne.png",
+    ),
+]
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-    for ax, (title, emb, lbl) in zip(axes, panels):
-        proj = TSNE(n_components=2, random_state=args.seed, perplexity=30).fit_transform(emb)
+    for title, emb, lbl, filename in panels:
+
+        fig, ax = plt.subplots(figsize=(8, 6))
+
+        emb_norm = normalize(emb)
+
+        print(f"\n{title}")
+        print(f"Silhouette Score        : {silhouette_score(emb_norm, lbl):.4f}")
+        print(f"Davies-Bouldin Index    : {davies_bouldin_score(emb_norm, lbl):.4f}")
+        print(f"Calinski-Harabasz Index : {calinski_harabasz_score(emb_norm, lbl):.2f}")
+
+        proj = TSNE(
+            n_components=2,
+            random_state=args.seed,
+            perplexity=30,
+        ).fit_transform(emb)
+
         for c in range(nc):
             mask = lbl == c
-            ax.scatter(proj[mask, 0], proj[mask, 1],
-                       label=class_names[c], alpha=0.7, s=20)
-        ax.set_title(title, fontsize=14)
-        ax.legend(fontsize=8)
-        ax.set_xticks([]); ax.set_yticks([])
+            ax.scatter(
+                proj[mask, 0],
+                proj[mask, 1],
+                label=class_names[c],
+                alpha=0.7,
+                s=20,
+            )
 
-    fig.suptitle("t-SNE of Learned Representations", fontsize=16, y=1.02)
-    plt.tight_layout()
-    path = os.path.join(args.output_dir, "tsne_comparison.png")
-    fig.savefig(path, dpi=300, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  Saved → {path}")
+        ax.set_title(title, fontsize=16)
+        ax.set_xticks([])
+        ax.set_yticks([])
 
+        ax.legend(
+            loc="best",
+            fontsize=10,
+            frameon=True,
+        )
 
-def generate_confusion_matrix(args):
-    print("\n▶ Generating confusion matrix …")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    _, test_df, label_to_idx = load_split(args.csv, seed=args.seed)
-    idx_to_label = {v: k for k, v in label_to_idx.items()}
-    nc = len(label_to_idx)
-    class_names = [idx_to_label[i] for i in range(nc)]
+        plt.tight_layout()
 
-    tag = f"full_method_r{args.rank}"
-    ckpt = _ensure_checkpoint(tag, args)
-    model = MultimodalLMFClassifier(rank=args.rank, num_classes=nc)
-    model, _ = _load_checkpoint(model, None, ckpt, device)
+        save_path = os.path.join(
+            args.output_dir,
+            filename,
+        )
 
-    result = evaluate(
-        model, None, test_df, label_to_idx,
-        args.histo_feature_dir, args.caption_feature_dir, device,
-        pool_mode="mean",
-    )
+        fig.savefig(
+            save_path,
+            dpi=300,
+            bbox_inches="tight",
+        )
 
-    cm = confusion_matrix(result["labels"], result["preds"])
-    fig, ax = plt.subplots(figsize=(7, 6))
-    im = ax.imshow(cm, interpolation="nearest", cmap=plt.cm.Blues)
-    fig.colorbar(im, ax=ax)
-    ax.set(
-        xticks=range(nc), yticks=range(nc),
-        xticklabels=class_names, yticklabels=class_names,
-        xlabel="Predicted", ylabel="True",
-        title="Confusion Matrix — Full Method",
-    )
-    plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
-    for i in range(nc):
-        for j in range(nc):
-            ax.text(j, i, str(cm[i, j]), ha="center", va="center",
-                    color="white" if cm[i, j] > cm.max() / 2 else "black")
-    plt.tight_layout()
-    path = os.path.join(args.output_dir, "confusion_matrix.png")
-    fig.savefig(path, dpi=300, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  Saved → {path}")
+        plt.close(fig)
 
+        print(f"Saved → {save_path}")
 
-def generate_attention_map(args):
-    print("\nGenerating attention heatmap…")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    _, test_df, label_to_idx = load_split(args.csv, seed=args.seed)
-    nc = len(label_to_idx)
+# def generate_tsne(args):
+#     """t-SNE: image-only vs text-only vs full method (3-panel)."""
+#     print("\nGenerating t-SNE…")
+#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+#     _, test_df, label_to_idx = load_split(args.csv, seed=args.seed)
+#     idx_to_label = {v: k for k, v in label_to_idx.items()}
+#     nc = len(label_to_idx)
+#     class_names = [idx_to_label[i] for i in range(nc)]
 
-    tag = f"full_method_r{args.rank}"
-    ckpt = _ensure_checkpoint(tag, args)
-    model = MultimodalLMFClassifier(rank=args.rank, num_classes=nc)
-    pool = AttentionPooling()
-    model, pool = _load_checkpoint(model, pool, ckpt, device)
+#     # image-only embeddings
+#     ckpt = _ensure_checkpoint("image_only", args)
+#     img_model = ImageOnlyClassifier(num_classes=nc)
+#     img_model, _ = _load_checkpoint(img_model, None, ckpt, device)
+#     res_img = evaluate(
+#         img_model, None, test_df, label_to_idx,
+#         args.histo_feature_dir, args.caption_feature_dir, device,
+#         pool_mode="mean", collect_embeddings=True,
+#     )
 
-    result = evaluate(
-        model, pool, test_df, label_to_idx,
-        args.histo_feature_dir, args.caption_feature_dir, device,
-        pool_mode="attention", collect_attention=True,
-    )
+#     txt_embeds, txt_labels = [], []
+#     for _, row in test_df.iterrows():
+#         try:
+#             _, cap = load_features(row["id"], args.histo_feature_dir, args.caption_feature_dir)
+#         except Exception:   
+#             continue
+#         txt_embeds.append(cap.numpy())
+#         txt_labels.append(label_to_idx[row["subtype"]])
+#     emb_txt = np.stack(txt_embeds)
+#     lbl_txt = np.array(txt_labels)
 
-    records = result["attention"]
-    n_show = min(5, len(records))
-    fig, axes = plt.subplots(1, n_show, figsize=(4 * n_show, 3))
-    if n_show == 1:
-        axes = [axes]
+#     # full method embeddings
+#     tag = f"full_method_r{args.rank}"
+#     ckpt = _ensure_checkpoint(tag, args)
+#     full_model = MultimodalLMFClassifier(rank=args.rank, num_classes=nc)
+#     full_model, _ = _load_checkpoint(full_model, None, ckpt, device)
+#     res_full = evaluate(
+#         full_model, None, test_df, label_to_idx,
+#         args.histo_feature_dir, args.caption_feature_dir, device,
+#         pool_mode="mean", collect_embeddings=True,
+#     )
 
-    for ax, (sid, w) in zip(axes, records[:n_show]):
-        w_np = w.numpy()
-        ax.bar(range(len(w_np)), w_np, color="steelblue", width=1.0)
-        ax.set_title(f"{sid[:12]}…", fontsize=10)
-        ax.set_xlabel("Patch index")
-        ax.set_ylabel("Attention weight")
+#     panels = [
+#         ("Image Only",  res_img["embeddings"],  np.array(res_img["labels"])),
+#         ("Text Only",   emb_txt,                lbl_txt),
+#         ("Full Method", res_full["embeddings"], np.array(res_full["labels"])),
+#     ]
 
-    fig.suptitle("Per-Patch Attention Weights", fontsize=14, y=1.02)
-    plt.tight_layout()
-    path = os.path.join(args.output_dir, "attention_heatmap.png")
-    fig.savefig(path, dpi=300, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  Saved → {path}")
+#     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+#     for ax, (title, emb, lbl) in zip(axes, panels):
+#         proj = TSNE(n_components=2, random_state=args.seed, perplexity=30).fit_transform(emb)
+#         for c in range(nc):
+#             mask = lbl == c
+#             ax.scatter(proj[mask, 0], proj[mask, 1],
+#                        label=class_names[c], alpha=0.7, s=20)
+#         ax.set_title(title, fontsize=14)
+#         ax.legend(fontsize=8)
+#         ax.set_xticks([]); ax.set_yticks([])
 
+#     fig.suptitle("t-SNE of Learned Representations", fontsize=16, y=1.02)
+#     plt.tight_layout()
+#     path = os.path.join(args.output_dir, "tsne_comparison.png")
+#     fig.savefig(path, dpi=300, bbox_inches="tight")
+#     plt.close(fig)
+#     print(f"  Saved → {path}")
 
+    
 VISUALIZATIONS = {
-    "tsne":             generate_tsne,
-    "confusion_matrix": generate_confusion_matrix,
-    "attention":        generate_attention_map,
+    "tsne":             generate_tsne
 }
 
-
-# ──────────────────────────────────────────────────────────────
-# CLI
-# ──────────────────────────────────────────────────────────────
 
 def build_parser():
     p = argparse.ArgumentParser(
@@ -756,8 +956,8 @@ def build_parser():
     mode.add_argument("--visualize", type=str, nargs="+",
                       choices=list(VISUALIZATIONS.keys()))
 
-    p.add_argument("--histo_feature_dir",   type=str, required=True)
-    p.add_argument("--caption_feature_dir", type=str, required=True)
+    p.add_argument("--histo_feature_dir",   type=str, default="features_phikon")
+    p.add_argument("--caption_feature_dir", type=str, default="features_mpnet")
     p.add_argument("--csv",        type=str,   default="captions_filtered.csv")
     p.add_argument("--output_dir", type=str,   default="results")
     p.add_argument("--epochs",     type=int,   default=10)
