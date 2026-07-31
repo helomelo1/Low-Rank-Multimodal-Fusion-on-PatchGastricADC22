@@ -8,3 +8,6 @@ features_mpnet
 logs*
 results*
 *.csv
+*.json
+*.txt
+*.pt
