@@ -26,25 +26,6 @@ This repository provides the official PyTorch implementation of **MKD-LMF**, a l
 
 ---
 
-## Results
-
-Our method achieves state-of-the-art accuracy on the [PatchGastric](https://github.com/med-air/PatchGastric) benchmark under the image-only inference setting (3-class GA subtype classification):
-
-| Method | Accuracy (%) | ∆ vs Ours |
-|---|---|---|
-| ABMIL | 66.67 ± 2.63 | −8.16 |
-| CLAM | 67.83 ± 1.12 | −7.00 |
-| TransMIL | 67.48 ± 1.16 | −7.35 |
-| DSMIL | 69.02 ± 0.42 | −5.81 |
-| CITE | 69.63 ± 0.91 | −5.20 |
-| ILRA-MIL | 70.16 ± 1.11 | −4.67 |
-| PathM3 | 71.48 ± 1.30 | −3.35 |
-| **MKD-LMF (Ours)** | **74.83 ± 1.49** | — |
-
-All results are reported as mean accuracy (%) ± std over three independent runs. Baselines are reproduced using the identical dataset, split, and subtypes as PathM3.
-
----
-
 ## Method
 
 ### Two-Stage Framework
@@ -184,15 +165,6 @@ python evaluate.py \
 
 ---
 
-## Pretrained Checkpoints
-
-| Model | Accuracy | Download |
-|---|---|---|
-| Teacher (multimodal) | 92.74% | [coming soon] |
-| Student (image-only) | 74.83% | [coming soon] |
-
----
-
 ## Repository Structure
 
 ```
@@ -214,38 +186,6 @@ MKD-LMF/
 ├── requirements.txt
 └── README.md
 ```
-
----
-
-## Ablation Study
-
-| Configuration | Accuracy (%) |
-|---|---|
-| Teacher model (multimodal inference) | 92.74 |
-| Student: Feature loss only (L_feat) | 73.63 |
-| Student: KD loss only (L_KD) | 73.13 |
-| **Student: Feature + KD loss (full)** | **74.83** |
-| Text-only unimodal | 68.76 |
-| Image-only unimodal | 70.35 |
-| Image-only with multimodal KD (ours) | 74.83 |
-
----
-
-## Hyperparameter Sensitivity
-
-| λ_KD | Accuracy (%) |
-|---|---|
-| 0.5 | **74.83** |
-| 1.0 | lower |
-| 2.0 | lower |
-| 5.0 | lower |
-
-| LMF Rank | Accuracy (%) |
-|---|---|
-| 16 | lower |
-| 32 | lower |
-| 64 | lower |
-| 128 | **74.83** |
 
 ---
 
