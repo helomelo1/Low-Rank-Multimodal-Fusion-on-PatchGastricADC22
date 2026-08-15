@@ -24,12 +24,6 @@ This repository provides the official PyTorch implementation of **MKD-LMF**, a l
 
 **Key idea:** A teacher model fuses WSI patch features with pathology report captions via [Low-Rank Multimodal Fusion (LMF)](https://aclanthology.org/P18-1209/). A student model then distils this multimodal knowledge to enable accurate **image-only** inference at test time—no pathology report needed.
 
-<p align="center">
-  <img src="assets/pipeline.png" alt="MKD-LMF Pipeline" width="90%"/>
-</p>
-
-*Figure: Two-stage MKD-LMF pipeline. Stage 1 trains the teacher with both image and text; Stage 2 distils multimodal knowledge into an image-only student.*
-
 ---
 
 ## Results
